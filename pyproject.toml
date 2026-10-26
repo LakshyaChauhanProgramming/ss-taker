@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ss-taker"
+version = "0.1.0"
+description = "Screenshot-to-text pipeline with caching and OCR preprocessing"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
+  "mss>=9.0.1",
+  "pillow>=10.0",
+  "opencv-python-headless>=4.9",
+  "pytesseract>=0.3.10",
+  "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "httpx>=0.27"]
+# In-process Tesseract; much less per-call overhead than the pytesseract CLI.
+fast = ["tesserocr>=2.7"]
+
+[project.scripts]
+ss-taker = "ss_taker.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
