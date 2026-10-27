@@ -59,6 +59,57 @@ Use `region: [x, y, width, height]` to OCR only part of the screen; it is faster
 | `SS_TAKER_OCR_ENGINE` | `auto` | `auto` uses tesserocr when installed; `pytesseract` forces the CLI |
 | `SS_TAKER_EARLY_EXIT_CONFIDENCE` | `70` | in `balanced`, skip extra passes when raw confidence is at least this |
 
+## Meeting summaries
+
+A meeting recording combines two sources into one timestamped transcript:
+
+- **screen**: OCR of a screen region (point `region` at the captions or chat pane) every few seconds. Lines that
+  were already seen are dropped, and a live caption that grows between captures replaces its earlier version.
+- **audio**: speech recognition with [faster-whisper](https://github.com/SYSTRAN/faster-whisper) on audio
+  recorded with `parec`. `others` is what the computer plays (the remote participants), `me` is the microphone.
+  Audio is processed in memory and never written to disk.
+
+The summary (overview, key topics, decisions) comes from [OpenRouter](https://openrouter.ai). The default model
+`openrouter/free` picks any free model per request; the response reports which one was used.
+
+```sh
+.venv/bin/pip install -e ".[audio]"     # plus: sudo apt install pulseaudio-utils (for parec)
+export OPENROUTER_API_KEY=sk-or-...
+```
+
+```sh
+# start; returns the meeting id
+curl -X POST http://127.0.0.1:8000/meetings -H "Content-Type: application/json" \
+  -d '{"title": "Weekly sync", "region": [0, 700, 1920, 300], "audio_sources": ["others", "me"]}'
+
+curl -X POST http://127.0.0.1:8000/meetings/<id>/stop
+curl http://127.0.0.1:8000/meetings/<id>/transcript
+curl -X POST http://127.0.0.1:8000/meetings/<id>/summarize -H "Content-Type: application/json" \
+  -d '{"language": "English"}'
+```
+
+| endpoint | purpose |
+|---|---|
+| `POST /meetings` | start recording (only one meeting records at a time; `409` otherwise) |
+| `POST /meetings/{id}/stop` | stop; waits for the last audio chunk to be transcribed |
+| `GET /meetings`, `GET /meetings/{id}` | status, segment count, errors, last summary |
+| `GET /meetings/{id}/transcript` | plain-text transcript, one `[mm:ss] (source) text` line per segment |
+| `POST /meetings/{id}/summarize` | summarize; also works while recording for a summary so far |
+| `GET /health/meeting` | whether audio capture and the LLM key are available |
+
+Each meeting is saved to `output/meetings/<id>.json` when it stops and after each summary.
+
+| variable | default | purpose |
+|---|---|---|
+| `OPENROUTER_API_KEY` | unset | required for `/summarize` |
+| `SS_TAKER_LLM_MODEL` | `openrouter/free` | any OpenRouter model id |
+| `SS_TAKER_LLM_URL` | OpenRouter chat completions | any OpenAI-compatible endpoint |
+| `SS_TAKER_LLM_TIMEOUT` | `120` | seconds per LLM call |
+| `SS_TAKER_LLM_CHUNK_CHARS` | `24000` | longer transcripts are summarized in parts, then merged |
+| `SS_TAKER_WHISPER_MODEL` | `base` | `small` is noticeably better for Hindi/Hinglish but ~3x slower on CPU |
+| `SS_TAKER_AUDIO_CHUNK_SECONDS` | `30` | audio is transcribed in chunks of this length |
+| `SS_TAKER_AUDIO_SILENCE_RMS` | `0.003` | quieter chunks are skipped (Whisper invents text on silence) |
+
 ## Exposing it publicly
 
 `scripts/run_public.sh` opens an ngrok tunnel and refuses to start without `SS_TAKER_TOKEN`:

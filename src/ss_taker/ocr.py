@@ -441,7 +441,10 @@ class OCRService:
         whitelist: Optional[str],
         preserve_layout: bool,
         mode: str = "balanced",
+        persist: bool = True,
     ) -> OCRResult:
+        """With persist=False nothing is written to output/; the meeting recorder
+        polls every few seconds and keeps its own transcript instead."""
         if self.startup_error:
             raise RuntimeError(self.startup_error)
         if mode not in OCR_MODES:
@@ -504,18 +507,20 @@ class OCRService:
         timings["total_ms"] = sum(timings.values())
         screenshot_b64 = self._encode_image_b64(self._resample_preview(raw)) if self.save_screenshots else ""
 
-        output_path = self._persist(
-            cleaned,
-            cached=False,
-            image_hash=image_hash,
-            timings_ms=timings,
-            mode=mode,
-            processed_text=cleaned_processed,
-            raw_text=cleaned_raw,
-            candidate_texts=cleaned_candidates,
-            capture_stats=capture_stats,
-            screenshot_b64=screenshot_b64,
-        )
+        output_path = Path()
+        if persist:
+            output_path = self._persist(
+                cleaned,
+                cached=False,
+                image_hash=image_hash,
+                timings_ms=timings,
+                mode=mode,
+                processed_text=cleaned_processed,
+                raw_text=cleaned_raw,
+                candidate_texts=cleaned_candidates,
+                capture_stats=capture_stats,
+                screenshot_b64=screenshot_b64,
+            )
         self.cache.set(CacheEntry(image_hash=image_hash, text=cleaned, output_path=str(output_path)))
         return OCRResult(
             mode=mode,

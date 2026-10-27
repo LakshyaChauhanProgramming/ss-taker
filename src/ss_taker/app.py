@@ -5,16 +5,21 @@ import logging
 import os
 import secrets
 import time
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
+from . import summarizer
+from .audio import audio_available
+from .meeting import MeetingBusyError, MeetingConfig, MeetingManager, MeetingSession
 from .ocr import OCRService, OCRResult, ocr_engine_name
 
 LOGGER = logging.getLogger("ss_taker")
 app = FastAPI(title="ss-taker")
 service: OCRService | None = None
+meetings = MeetingManager()
 
 
 def require_token(
@@ -162,6 +167,7 @@ def metrics() -> MetricsResponse:
 @app.on_event("shutdown")
 def _shutdown() -> None:
     global service
+    meetings.stop_all()
     if service is not None:
         service.close()
         service = None
@@ -220,6 +226,123 @@ def pick_ss(req: PickSSRequest) -> Response:
         json_path=str(result.output_path),
     )
     return Response(content=payload.model_dump_json(indent=2), media_type="application/json")
+
+
+class StartMeetingRequest(BaseModel):
+    title: str = ""
+    ocr: bool = True
+    region: Optional[tuple[int, int, int, int]] = Field(
+        default=None, description="x, y, width, height of the captions/chat pane; whole screen when omitted"
+    )
+    ocr_interval_seconds: float = Field(default=5, ge=1, le=60)
+    lang: str = "eng"
+    audio: bool = True
+    audio_sources: list[Literal["others", "me"]] = Field(
+        default_factory=lambda: ["others"],
+        description="others = what the computer plays (remote participants), me = microphone",
+    )
+    audio_language: Optional[str] = Field(
+        default=None, description="Whisper language code, e.g. hi or en; auto-detected when omitted"
+    )
+
+
+class SummarizeRequest(BaseModel):
+    language: str = Field(default="English", description="Language to write the summary in")
+
+
+class MeetingSummaryModel(BaseModel):
+    summary: str
+    key_topics: list[dict[str, object]]
+    decisions: list[str]
+    model: str
+    parts: int
+
+
+class MeetingInfo(BaseModel):
+    id: str
+    title: str
+    status: str
+    started_at: float
+    stopped_at: float | None
+    duration_seconds: float
+    ocr: bool
+    audio_sources: list[str]
+    ocr_captures: int
+    segments: int
+    errors: list[str]
+    summary: MeetingSummaryModel | None
+
+
+class HealthMeetingResponse(BaseModel):
+    audio: bool
+    audio_error: str | None
+    llm_configured: bool
+    llm_model: str
+
+
+@app.get("/health/meeting", response_model=HealthMeetingResponse, dependencies=protected)
+def health_meeting() -> HealthMeetingResponse:
+    reason = audio_available()
+    return HealthMeetingResponse(
+        audio=reason is None,
+        audio_error=reason,
+        llm_configured=summarizer.configured(),
+        llm_model=summarizer.DEFAULT_MODEL,
+    )
+
+
+@app.post("/meetings", response_model=MeetingInfo, status_code=201, dependencies=protected)
+def start_meeting(req: StartMeetingRequest) -> MeetingInfo:
+    if not req.ocr and not req.audio:
+        raise HTTPException(status_code=400, detail="Enable ocr, audio or both")
+    config = MeetingConfig(**req.model_dump())
+    try:
+        session = meetings.start(config, _get_service() if req.ocr else None)
+    except MeetingBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return MeetingInfo(**session.info())
+
+
+@app.get("/meetings", response_model=list[MeetingInfo], dependencies=protected)
+def list_meetings() -> list[MeetingInfo]:
+    return [MeetingInfo(**m.info()) for m in meetings.all()]
+
+
+@app.get("/meetings/{meeting_id}", response_model=MeetingInfo, dependencies=protected)
+def get_meeting(meeting_id: str) -> MeetingInfo:
+    return MeetingInfo(**_get_meeting(meeting_id).info())
+
+
+@app.post("/meetings/{meeting_id}/stop", response_model=MeetingInfo, dependencies=protected)
+def stop_meeting(meeting_id: str) -> MeetingInfo:
+    session = _get_meeting(meeting_id)
+    session.stop()
+    return MeetingInfo(**session.info())
+
+
+@app.get("/meetings/{meeting_id}/transcript", response_class=PlainTextResponse, dependencies=protected)
+def meeting_transcript(meeting_id: str) -> str:
+    return _get_meeting(meeting_id).transcript_text()
+
+
+@app.post("/meetings/{meeting_id}/summarize", response_model=MeetingSummaryModel, dependencies=protected)
+def summarize_meeting(meeting_id: str, req: SummarizeRequest | None = None) -> MeetingSummaryModel:
+    """Works while recording too (summary so far); call again after stop for the final one."""
+    session = _get_meeting(meeting_id)
+    try:
+        result = session.summarize(language=(req or SummarizeRequest()).language)
+    except summarizer.SummarizerInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except summarizer.SummarizerError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return MeetingSummaryModel(**result.to_dict())
+
+
+def _get_meeting(meeting_id: str) -> MeetingSession:
+    session = meetings.get(meeting_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    return session
 
 
 def create_app() -> FastAPI:
